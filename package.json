@@ -6,15 +6,20 @@
     "dev": "cross-env NODE_ENV=development vite",
     "electron:dev": "cross-env NODE_ENV=development electron .",
     "build:renderer": "vite build",
-    "build": "yarn build:renderer && electron-builder",
+    "build": "npm run build:renderer && electron-builder",
+    "build:mac": "npm run build:renderer && electron-builder --mac",
+    "build:mac:x64": "npm run build:renderer && electron-builder --mac --x64",
+    "build:mac:arm64": "npm run build:renderer && electron-builder --mac --arm64",
+    "build:mac:universal": "npm run build:renderer && electron-builder --mac universal",
+    "build:win": "npm run build:renderer && electron-builder --win",
+    "build:all": "npm run build:renderer && electron-builder --mac --win",
     "postinstall": "electron-builder install-app-deps"
   },
   "dependencies": {
     "@zxing/browser": "^0.1.5",
+    "@zxing/library": "^0.21.3",
     "element-plus": "^2.13.1",
-    "vue": "^3.5.26",
-    "ffmpeg-static": "^5.3.0",
-    "fluent-ffmpeg": "^2.1.3"
+    "vue": "^3.5.26"
   },
   "devDependencies": {
     "@vitejs/plugin-vue": "^6.0.3",
@@ -26,6 +31,10 @@
   "build": {
     "appId": "com.example.electroncv",
     "productName": "ElectronCV",
+    "protocols": {
+      "name": "ElectronCV",
+      "schemes": ["app"]
+    },
     "files": [
       "dist/**",
       "electron/**",
@@ -34,17 +43,41 @@
     "directories": {
       "buildResources": "build"
     },
+    "electronDownload": {
+      "mirror": "https://npmmirror.com/mirrors/electron/"
+    },
     "mac": {
       "target": [
-        "dmg",
-        "zip"
-      ]
+        {
+          "target": "dmg",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ],
+      "category": "public.app-category.utilities",
+      "icon": "build/icon.icns",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist",
+      "extendInfo": {
+        "NSCameraUsageDescription": "此应用需要访问摄像头以识别条形码和录制视频",
+        "NSMicrophoneUsageDescription": "此应用需要访问麦克风以录制音频（可选）"
+      },
+      "type": "distribution"
     },
     "win": {
       "target": [
-        "nsis",
-        "zip"
-      ]
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.ico"
     }
   }
 }

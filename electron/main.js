@@ -1,35 +1,134 @@
-const { app, BrowserWindow, ipcMain } = require("electron");
+const {
+  app,
+  BrowserWindow,
+  ipcMain,
+  dialog,
+  shell,
+  session,
+  protocol,
+} = require("electron");
 const path = require("path");
 const fs = require("fs");
-const ffmpeg = require("fluent-ffmpeg");
-const ffmpegPath = require("ffmpeg-static");
-
-ffmpeg.setFfmpegPath(ffmpegPath);
 
 const isDev = process.env.NODE_ENV === "development";
 
 let mainWindow;
+let fileWatcher = null;
 
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 1024,
-    height: 768,
+    width: 2048,
+    height: 1024,
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
       nodeIntegration: false,
+      // 使用自定义协议，不需要禁用 webSecurity
+      webSecurity: true,
+      // 禁用沙盒以解决 MediaStream 问题
+      sandbox: false,
     },
   });
+
+  // 处理媒体权限请求（摄像头、麦克风）
+  mainWindow.webContents.session.setPermissionRequestHandler(
+    (webContents, permission, callback) => {
+      // 自动允许摄像头和麦克风权限
+      if (permission === "media" || permission === "mediaKeySystem") {
+        callback(true);
+      } else {
+        callback(false);
+      }
+    }
+  );
+
+  // 处理媒体访问权限检查
+  mainWindow.webContents.session.setPermissionCheckHandler(
+    (webContents, permission, requestingOrigin, details) => {
+      if (permission === "media") {
+        return true;
+      }
+      return false;
+    }
+  );
+
+  // 设置 CSP，允许 mediastream 和自定义协议
+  mainWindow.webContents.session.webRequest.onHeadersReceived(
+    (details, callback) => {
+      callback({
+        responseHeaders: {
+          ...details.responseHeaders,
+          "Content-Security-Policy": [
+            "default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob: mediastream: app:",
+          ],
+        },
+      });
+    }
+  );
 
   if (isDev) {
     mainWindow.loadURL("http://localhost:5173");
     mainWindow.webContents.openDevTools();
   } else {
-    mainWindow.loadFile(path.join(__dirname, "..", "dist", "index.html"));
+    // 使用自定义协议加载页面，而不是 file:// 协议
+    mainWindow.loadURL("app://./index.html");
   }
+
+  // 监听页面加载完成
+  mainWindow.webContents.on("did-finish-load", () => {
+    console.log("页面加载完成");
+  });
+
+  // 转发渲染进程的控制台消息到主进程
+  mainWindow.webContents.on(
+    "console-message",
+    (event, level, message, line, sourceId) => {
+      console.log(`[Renderer] ${message}`);
+    }
+  );
+}
+
+// 注册自定义协议必须在 app ready 之前
+if (!isDev) {
+  // 注册特权标准协议，这样它的行为就像 http:// 一样
+  protocol.registerSchemesAsPrivileged([
+    {
+      scheme: "app",
+      privileges: {
+        standard: true,
+        secure: true,
+        supportFetchAPI: true,
+        corsEnabled: true,
+        stream: true, // 关键：支持流媒体
+      },
+    },
+  ]);
 }
 
 app.whenReady().then(() => {
+  // 注册自定义协议，用于解决 file:// 协议下 MediaStream 无法工作的问题
+  if (!isDev) {
+    protocol.registerFileProtocol("app", (request, callback) => {
+      // 从 app://./index.html 提取文件路径
+      let requestPath = request.url.slice("app://".length);
+
+      // 处理 ./ 开头的路径
+      if (requestPath.startsWith("./")) {
+        requestPath = requestPath.slice(2);
+      }
+
+      // 解码 URL 编码的字符
+      requestPath = decodeURIComponent(requestPath);
+
+      // 拼接完整路径
+      const normalizedPath = path.normalize(
+        path.join(__dirname, "..", "dist", requestPath)
+      );
+
+      callback({ path: normalizedPath });
+    });
+  }
+
   createWindow();
 
   app.on("activate", () => {
@@ -45,41 +144,197 @@ app.on("window-all-closed", () => {
   }
 });
 
-ipcMain.handle("save-video", async (event, { buffer, extension }) => {
+ipcMain.handle("choose-save-path", async () => {
   try {
-    const videosDir = app.getPath("videos");
-    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-
-    // 先保存为临时 webm 文件
-    // const tempWebmName = `capture-${timestamp}.${extension || 'webm'}`
-    // const tempWebmPath = path.join(videosDir, tempWebmName)
-    // const data = Buffer.from(buffer)
-    // await fs.promises.writeFile(tempWebmPath, data)
-
-    // 目标 mp4 文件
-    const mp4Name = `capture-${timestamp}.mp4`;
-    const mp4Path = path.join(videosDir, mp4Name);
-
-    // 使用 ffmpeg 转码为 mp4
-    await new Promise((resolve, reject) => {
-      ffmpeg(tempWebmPath)
-        .outputOptions("-c:v libx264", "-c:a aac")
-        .on("end", resolve)
-        .on("error", reject)
-        .save(mp4Path);
+    const result = await dialog.showOpenDialog(mainWindow, {
+      properties: ["openDirectory", "createDirectory"],
+      title: "选择视频保存目录",
+      buttonLabel: "选择此目录",
     });
 
-    // 转码完成后，可以删除临时 webm
-    try {
-      await fs.promises.unlink(tempWebmPath);
-    } catch (e) {
-      // 删除失败不影响整体成功
-      console.warn("Failed to delete temp webm file", e);
+    if (result.canceled || !result.filePaths || result.filePaths.length === 0) {
+      return { success: false };
     }
 
-    return { success: true, path: mp4Path };
+    return { success: true, path: result.filePaths[0] };
   } catch (err) {
-    console.error("Failed to save video", err);
+    console.error("Failed to choose save path", err);
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle(
+  "save-video",
+  async (event, { buffer, extension, customPath, barcode }) => {
+    try {
+      // 如果有自定义路径就用自定义的，否则用默认的视频目录
+      const videosDir = customPath || app.getPath("videos");
+      const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+
+      // 文件名格式：[识别码]+[时间戳]
+      const barcodePrefix = barcode ? `${barcode}_` : "";
+      const filename = `${barcodePrefix}${timestamp}.${extension || "webm"}`;
+
+      const filepath = path.join(videosDir, filename);
+      const data = Buffer.from(buffer);
+      await fs.promises.writeFile(filepath, data);
+      return { success: true, path: filepath };
+    } catch (err) {
+      console.error("Failed to save video", err);
+      return { success: false, error: err.message };
+    }
+  }
+);
+
+ipcMain.handle("get-video-list", async (event, customPath) => {
+  try {
+    const videosDir = customPath || app.getPath("videos");
+
+    // 检查目录是否存在
+    try {
+      await fs.promises.access(videosDir);
+    } catch (err) {
+      // 目录不存在，返回空列表
+      return { success: true, files: [], dir: videosDir };
+    }
+
+    const files = await fs.promises.readdir(videosDir);
+    const videoExtensions = [".mp4", ".webm", ".avi", ".mov", ".mkv"];
+
+    const videoFiles = [];
+    for (const file of files) {
+      const ext = path.extname(file).toLowerCase();
+      if (videoExtensions.includes(ext)) {
+        const filepath = path.join(videosDir, file);
+        const stat = await fs.promises.stat(filepath);
+        videoFiles.push({
+          name: file,
+          path: filepath,
+          size: formatFileSize(stat.size),
+          time: stat.birthtime.toLocaleString("zh-CN"),
+        });
+      }
+    }
+
+    // 按创建时间降序排列（最新的在前）
+    videoFiles.sort((a, b) => {
+      const aTime = new Date(a.time).getTime();
+      const bTime = new Date(b.time).getTime();
+      return bTime - aTime;
+    });
+
+    return { success: true, files: videoFiles, dir: videosDir };
+  } catch (err) {
+    console.error("Failed to get video list", err);
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle("open-directory", async (event, dirPath) => {
+  try {
+    const targetDir = dirPath || app.getPath("videos");
+    await shell.openPath(targetDir);
+    return { success: true };
+  } catch (err) {
+    console.error("Failed to open directory", err);
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle("open-file", async (event, filePath) => {
+  try {
+    await shell.openPath(filePath);
+    return { success: true };
+  } catch (err) {
+    console.error("Failed to open file", err);
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle("delete-file", async (event, filePath) => {
+  try {
+    // 检查文件是否存在
+    await fs.promises.access(filePath);
+    // 删除文件
+    await fs.promises.unlink(filePath);
+    console.log("文件已删除:", filePath);
+    return { success: true };
+  } catch (err) {
+    console.error("Failed to delete file", err);
+    return { success: false, error: err.message };
+  }
+});
+
+// 格式化文件大小
+function formatFileSize(bytes) {
+  if (bytes === 0) return "0 B";
+  const k = 1024;
+  const sizes = ["B", "KB", "MB", "GB"];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return Math.round((bytes / Math.pow(k, i)) * 100) / 100 + " " + sizes[i];
+}
+
+// 启动目录监听
+ipcMain.handle("start-watch-directory", async (event, customPath) => {
+  try {
+    const videosDir = customPath || app.getPath("videos");
+
+    // 停止已有的监听器
+    if (fileWatcher) {
+      fileWatcher.close();
+      fileWatcher = null;
+    }
+
+    // 检查目录是否存在
+    try {
+      await fs.promises.access(videosDir);
+    } catch (err) {
+      // 目录不存在，创建它
+      await fs.promises.mkdir(videosDir, { recursive: true });
+    }
+
+    // 创建文件监听器
+    fileWatcher = fs.watch(videosDir, (eventType, filename) => {
+      if (filename && eventType === "rename") {
+        // 文件被添加或删除
+        console.log("文件变化:", eventType, filename);
+        // 通知渲染进程刷新列表
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send("file-changed");
+        }
+      }
+    });
+
+    console.log("开始监听目录:", videosDir);
+    return { success: true, dir: videosDir };
+  } catch (err) {
+    console.error("Failed to start watching directory", err);
+    return { success: false, error: err.message };
+  }
+});
+
+// 停止目录监听
+ipcMain.handle("stop-watch-directory", async () => {
+  try {
+    if (fileWatcher) {
+      fileWatcher.close();
+      fileWatcher = null;
+      console.log("停止监听目录");
+    }
+    return { success: true };
+  } catch (err) {
+    console.error("Failed to stop watching directory", err);
+    return { success: false, error: err.message };
+  }
+});
+
+// 获取默认保存路径
+ipcMain.handle("get-default-path", async () => {
+  try {
+    const defaultPath = app.getPath("videos");
+    return { success: true, path: defaultPath };
+  } catch (err) {
+    console.error("Failed to get default path", err);
     return { success: false, error: err.message };
   }
 });
