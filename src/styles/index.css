@@ -1,0 +1,15 @@
+.camera-container {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.video-wrapper {
+  width: 100%;
+  max-width: 640px;
+}
+
+.video-element {
+  width: 100%;
+  background: #000;
+}
