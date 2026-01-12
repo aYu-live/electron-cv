@@ -108,24 +108,80 @@ if (!isDev) {
 app.whenReady().then(() => {
   // 注册自定义协议，用于解决 file:// 协议下 MediaStream 无法工作的问题
   if (!isDev) {
-    protocol.registerFileProtocol("app", (request, callback) => {
-      // 从 app://./index.html 提取文件路径
-      let requestPath = request.url.slice("app://".length);
+    protocol.handle("app", (request) => {
+      try {
+        // 从 app://./index.html 提取文件路径
+        const url = new URL(request.url);
+        let requestPath = url.pathname;
 
-      // 处理 ./ 开头的路径
-      if (requestPath.startsWith("./")) {
-        requestPath = requestPath.slice(2);
+        // 处理开头的斜杠
+        if (requestPath.startsWith("/")) {
+          requestPath = requestPath.slice(1);
+        }
+
+        // 解码 URL 编码的字符
+        requestPath = decodeURIComponent(requestPath);
+
+        // 获取 dist 目录的绝对路径
+        const distPath = path.join(__dirname, "..", "dist");
+        
+        // 拼接完整路径并规范化
+        const normalizedPath = path.normalize(
+          path.join(distPath, requestPath)
+        );
+
+        // 安全检查：确保路径在 dist 目录内，防止路径遍历攻击
+        if (!normalizedPath.startsWith(path.normalize(distPath))) {
+          console.error("路径遍历攻击尝试被阻止:", requestPath);
+          return new Response("Access Denied", {
+            status: 403,
+            headers: { "content-type": "text/plain" }
+          });
+        }
+
+        // 检查文件是否存在
+        if (!fs.existsSync(normalizedPath)) {
+          console.warn("文件不存在:", normalizedPath);
+          return new Response("File Not Found", {
+            status: 404,
+            headers: { "content-type": "text/plain" }
+          });
+        }
+
+        // 读取文件内容
+        const data = fs.readFileSync(normalizedPath);
+        
+        // 根据文件扩展名设置 MIME 类型
+        const ext = path.extname(normalizedPath).toLowerCase();
+        const mimeTypes = {
+          '.html': 'text/html',
+          '.css': 'text/css',
+          '.js': 'application/javascript',
+          '.json': 'application/json',
+          '.png': 'image/png',
+          '.jpg': 'image/jpeg',
+          '.jpeg': 'image/jpeg',
+          '.gif': 'image/gif',
+          '.svg': 'image/svg+xml',
+          '.ico': 'image/x-icon',
+          '.woff': 'font/woff',
+          '.woff2': 'font/woff2',
+          '.ttf': 'font/ttf',
+          '.eot': 'application/vnd.ms-fontobject',
+        };
+        const mimeType = mimeTypes[ext] || 'application/octet-stream';
+
+        return new Response(data, {
+          status: 200,
+          headers: { "content-type": mimeType }
+        });
+      } catch (err) {
+        console.error("协议处理器错误:", err);
+        return new Response("Internal Server Error", {
+          status: 500,
+          headers: { "content-type": "text/plain" }
+        });
       }
-
-      // 解码 URL 编码的字符
-      requestPath = decodeURIComponent(requestPath);
-
-      // 拼接完整路径
-      const normalizedPath = path.normalize(
-        path.join(__dirname, "..", "dist", requestPath)
-      );
-
-      callback({ path: normalizedPath });
     });
   }
 
